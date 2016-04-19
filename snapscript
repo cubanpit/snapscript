@@ -37,6 +37,7 @@
 #  - with the above todo add the posssibility to set the frequency manually;
 #
 
+
 ##
 ## CONFIGS
 ##
@@ -57,6 +58,7 @@ FSPART="/dev/sda2"
 # Path for btrfs volume mount
 ROOTFS="/mnt/rootfs/"
 
+
 ##
 ## SCRIPT
 ##
@@ -73,7 +75,6 @@ fi
 ##
 # FUNCTIONS:
 ##
-
 
 # This function actually take snapshots through btrfs utility
 do_snapshot () {
@@ -93,8 +94,8 @@ fi
 }
 
 
+# This function allow to unmount the device before exit
 unmount_vol () {
-# Unmount the device before exit
 ERR=$1
 echo
 echo -n "Do you want to unmount $FSPART from $ROOTFS [y/N]? "
