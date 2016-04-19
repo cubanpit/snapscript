@@ -1,0 +1,305 @@
+#!/bin/bash
+
+##
+# This script should make read-only snapshot of desired btrfs subvolumes, and
+#  should also help to keep the subvolume list clean asking to remove old and
+#  unuseful snapshot.
+# PAY ATTENTION: this script is tested on a single system, it should work
+#  correctly if you've done snapshot only through this script, but it's not 100%
+#  secure.
+# Read all outputs carefully before proceeding!
+#
+# This script wil not take snapshots automagically without your interaction,
+#  if you want to have a snapshot you have to run it manually.
+# 
+# If you set a monthly snapshot of home subvolume, this script will check
+#  the month of your previous snapshots and ask you the confirmation for taking
+#  a snapshot only when the actual month differs. otherwise it will skip that
+#  suvolume.
+#
+# Example:
+#  - you take a "monthly" snapshot on 10 april 2016 (month n.4), it's saved as 
+#     name_$YEAR_$MONTH i.e. name_2016_04;
+#  - you run the script on 22 april 2016, it looks for a name_2016_04 snapshot,
+#     it finds it, it does not ask you to take another one;
+#  - you run the script again on 2 may 2016 (month n.5), it looks for a
+#     name_2016_05 snapshot, it does not find it, it asks you to take another
+#     snapshot.
+#
+#  It's quite a stupid method, but it's simple and, with this name format,
+#   snapshots are easy to handle also without this script.
+##
+
+#
+# TODO:
+#  - add a weekly snapshot config;
+#  - write a simpler (to read) and flexible code;
+#  - with the above todo add the posssibility to set the frequency manually;
+#
+
+##
+## CONFIGS
+##
+
+# Subvolume to backup often (for example the root of filesystem)
+SUBV0="ROOT"
+# Default number of snapshot of this subvolume to keep
+NDEF0="5"
+
+# Subvolume to backup once a month (for example the user home directory)
+SUBV2="HOME"
+# Default number of snapshot of this subvolume to keep
+NDEF2="3"
+
+# Btrfs volume/partition path
+FSPART="/dev/sda2"
+
+# Path for btrfs volume mount
+ROOTFS="/mnt/rootfs/"
+
+##
+## SCRIPT
+##
+
+# If user is not root, then you need 'sudo'
+if [[ "$(id -u)" = "0" ]]
+then
+	SUDO=""
+else
+	SUDO="sudo"
+fi
+
+
+##
+# FUNCTIONS:
+##
+
+
+# This function actually take snapshots through btrfs utility
+do_snapshot () {
+echo
+echo "I'll take a snapshot in $ROOTFS$SUBVOL$($DATE)."
+echo -n "Do you want to continue (this cannot be undone) [y/N]? "
+read -r sure
+
+if [[ $sure = "y" ]]
+then
+	$SUDO btrfs subvolume snapshot -r "$ROOTFS$SUBVOL" \
+		"$ROOTFS$SUBVOL$($DATE)"
+	echo "[Snapshot executed]"
+else
+	echo "[Snapshot not executed]"
+fi
+}
+
+
+unmount_vol () {
+# Unmount the device before exit
+ERR=$1
+echo
+echo -n "Do you want to unmount $FSPART from $ROOTFS [y/N]? "
+read -r sure
+if [[ $sure = "y" ]]
+then
+	$SUDO umount $ROOTFS
+	echo "[Volume unmounted]"
+	echo
+	exit "$ERR"
+else
+	echo "[Volume not unmounted]"
+	echo
+	exit "$ERR"
+fi
+}
+
+
+# This function will check existent subvolume with different method,
+#  printing them asking the user to check.
+check_subvolume () {
+
+# Print a list with Btrfs utility
+echo "This a list of subvolumes in your btrfs filesystem:"
+$SUDO btrfs subvolume list $ROOTFS -t
+echo
+
+# Print a list with manual method, easy to filter
+echo "This is a list of subvolumes of interest:"
+find $ROOTFS "$ROOTFS$SUBVOL"_* -maxdepth 0 | grep "$SUBVOL" | tail -n +1
+echo
+echo -e "\033[1;4;5;31mCheck the previous list!\033[0m"
+echo -e "\033[1;31mThere should be all and only snapshots of $SUBVOL" \
+	"subvolume, otherwise this script could delete important subvolumes."
+echo -e "\033[0m"
+
+# Total number of subvolume snapshot
+NSUBV=$(find $ROOTFS "$ROOTFS$SUBVOL"_* -maxdepth 0 | grep "$SUBVOL" | \
+	tail -n +1 | wc -l)
+echo "You have totally $NSUBV snapshots of $SUBVOL subvolume."
+ANS=$(( NSUBV + 1 ))
+while [[ $ANS -gt $NSUBV ]]
+do
+	echo -n "How many old snapshot do you want to keep"\
+		"[default=$NDEF]? "
+	read -r ANS
+	if [[ -z $ANS ]]
+	then
+		if [[ $NDEF -gt $NSUBV ]]
+		then
+			ANS=$NSUBV
+		else
+			ANS=$NDEF
+		fi
+	fi
+	if [[ $ANS -gt $NSUBV ]]
+	then
+		echo
+		echo "ERRROR: You can't keep $ANS snapshots if there"\
+			"are only $NSUBV!"
+	else
+		if [[ $ANS -eq $NSUBV ]]
+		then
+			echo
+			echo "You want to keep $ANS of $NSUBV snapshots, so there is" \
+				"nothing to be done."
+			echo "[Snapshot(s) not deleted]"
+			stop_it 0
+		fi
+	fi
+done
+echo
+
+# Recursively delete all unuseful subvolume
+for (( i=0; i < $(( NSUBV - ANS )); i++ ))
+do
+	TARGET=$(find $ROOTFS "$ROOTFS$SUBVOL"_* -maxdepth 0 | grep "$SUBVOL" | \
+		tail -n +1 | head -n 1)
+	echo -n "Do you really want to DEFINITELY delete $TARGET subvolume"\
+		"(this cannot be undone) [y/N]? "
+	read -r sure
+	if [[ $sure = "y" ]]
+	then
+		$SUDO btrfs subvolume delete "$TARGET"
+		echo "[Snapshot deleted]"
+		echo
+	else
+		echo "[Snapshot(s) not deleted]"
+		echo
+	fi
+done
+}
+
+
+# The main function that runs all the stuff
+run () {
+SUBVOL=$1
+PRIOR=$2
+
+# Set "max frequency" of snapshots based on priority
+if [[ $PRIOR = 0 ]]
+then
+	DATE="date +_%Y-%m-%d_%H:%M"
+	NDEF=$NDEF0
+elif [[ $PRIOR = 2 ]]
+then
+	DATE="date +_%Y-%m"
+	NDEF=$NDEF2
+else
+	echo
+	echo "[Fatal error]"
+	echo "Wrong priority (my fault)! Please, contact me at github!"
+	echo
+	exit 1
+fi
+
+# Check if the block device exist
+if [[ ! -b $FSPART ]]
+then
+	echo
+	echo "[Volume does not exist]"
+	echo "There is no $FSPART volume in this system. Try changing FSPART"\
+		"parameter in the head this script file."
+	echo
+	exit 1
+fi
+
+# Check if something is mounted on the mountpoint
+if (! mountpoint -q $ROOTFS)
+then
+	echo
+	echo -n "There is no volume mounted at $ROOTFS , do you want to mount"\
+		"now $FSPART at $ROOTFS [y/N]? "
+	read -r sure
+	if [[ $sure = "y" ]]
+	then
+		sudo mount $FSPART $ROOTFS
+		echo "[Volume mounted]"
+	else
+		echo "[Volume not mounted]"
+		echo "If volume is not mounted, you can't do anything with subvolumes."
+		echo
+		exit 1
+	fi
+fi
+
+# Check if the subvolume exist
+if [[ ! -d $ROOTFS$SUBVOL ]]
+then
+	echo "[Subvolume does not exist]"
+	echo "There is no $SUBVOL subvolume in $FSPART. Try changing SUBVOL"\
+		"or FSPART parameters in the head of this script file."
+	echo
+	unmount_vol 1
+fi
+
+# Take the snapshot if there isn't a subvolume with the same name
+if [[ -d $ROOTFS$SUBVOL$($DATE) ]]
+then
+	echo
+	echo "You have already done a snapshot of $SUBVOL subvolume with a time"\
+		"string like $($DATE)."
+else
+	do_snapshot
+fi
+
+echo
+
+# Check previous snapshot and eventually delete some of them
+echo -n "Do you want to check old snapshots [y/N]? "
+read -r sure
+if [[ $sure = "y" ]]
+then
+	check_subvolume
+else
+	echo "[Check not executed]"
+fi
+}
+
+# Stop function, just to be sure that you can always run it for every
+#  subvolume you desire, to exit it calls unmount_vol, with error code.
+stop_it () {
+ERR=$1
+if [[ $SUBVOL = $SUBV0 && -n $SUBV2 ]]
+then
+	run $SUBV2 2
+else
+	unmount_vol "$ERR"
+fi
+}
+
+# This part launches everything if you have configured subvolumes
+
+if [[ -n $SUBV0 && -n $NDEF0 ]]
+then
+	run $SUBV0 0
+fi
+if [[ -n $SUBV2 && -n $NDEF2 && $SUBVOL != $SUBV2 ]]
+then
+	run $SUBV2 2
+fi
+if [[ -z $SUBV0 && -z $SUBV2 ]]
+then
+	echo
+	echo "You haven't configured any subvolume to backup,"\
+		"read the head of this script for more information."
+fi
+stop_it 0
