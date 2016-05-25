@@ -14,35 +14,31 @@
 
 #
 # TODO:
-#  - add a weekly snapshot config;
-#  - write a simpler (to read) and flexible code;
-#  - with the above todo add the posssibility to set the frequency manually;
+#  - write a 'easier to read' and 'more flexible' code;
+#  - add some keyword for frequency, like 'daily', 'weekly' and 'monthly';
 #
 
 
 ##
-## CONFIGS
+## CONFIGURATION (touch it)
 ##
 
-# Subvolume to backup often (for example the root of filesystem)
-SUBV0="ROOT"
-# Default number of snapshot of this subvolume to keep
-NDEF0="5"
-
-# Subvolume to backup once a month (for example the user home directory)
-SUBV2="HOME"
-# Default number of snapshot of this subvolume to keep
-NDEF2="3"
+# Subvolumes to backup (it's a bash array, spaces are separators)
+declare -ar SUBVS=(ROOT HOME)
+# Default number of snapshots to keep (same order of previous array)
+declare -air NDEFS=(10 3)
+# Default frequency in seconds (1d=86400s, 7d=604800s, 30d=2592000s)(same order)
+declare -air FREQS=(200 604800)
 
 # Btrfs volume/partition path
-FSPART="/dev/sda2"
+declare -r FSPART="/dev/sdb"
 
 # Path for btrfs volume mount
-ROOTFS="/mnt/rootfs/"
+declare -r ROOTFS="/mnt/rootfs/"
 
 
 ##
-## SCRIPT
+## SCRIPT (don't touch it)
 ##
 
 # If user is not root, then you need 'sudo'
@@ -58,7 +54,8 @@ fi
 # FUNCTIONS:
 ##
 
-# This function actually take snapshots through btrfs utility
+# DO_SNAPSHOT
+# This function actually take snapshots using btrfs-progs utility
 do_snapshot () {
 echo
 echo "I'll take a snapshot in $ROOTFS$SUBVOL$($DATE)."
@@ -75,27 +72,33 @@ else
 fi
 }
 
-
+# UNMOUNT_VOL
 # This function allow to unmount the device before exit
 unmount_vol () {
 ERR=$1
-echo
-echo -n "Do you want to unmount $FSPART from $ROOTFS [y/N]? "
-read -r sure
-if [[ $sure = "y" ]]
+if (! mountpoint -q $ROOTFS)
 then
-	$SUDO umount $ROOTFS
-	echo "[Volume unmounted]"
 	echo
 	exit "$ERR"
 else
-	echo "[Volume not unmounted]"
 	echo
-	exit "$ERR"
+	echo -n "Do you want to unmount $FSPART from $ROOTFS [y/N]? "
+	read -r sure
+	if [[ $sure = "y" ]]
+	then
+		$SUDO umount $ROOTFS
+		echo "[Volume unmounted]"
+		echo
+		exit "$ERR"
+	else
+		echo "[Volume not unmounted]"
+		echo
+		exit "$ERR"
+	fi
 fi
 }
 
-
+# CHECK_SUBVOLUME
 # This function will check existent subvolume with different method,
 #  printing them asking the user to check.
 check_subvolume () {
@@ -121,8 +124,7 @@ echo "You have totally $NSUBV snapshots of $SUBVOL subvolume."
 ANS=$(( NSUBV + 1 ))
 while [[ $ANS -gt $NSUBV ]]
 do
-	echo -n "How many old snapshot do you want to keep"\
-		"[default=$NDEF]? "
+	echo -n "How many old snapshot do you want to keep [default=$NDEF]? "
 	read -r ANS
 	if [[ -z $ANS ]]
 	then
@@ -136,8 +138,7 @@ do
 	if [[ $ANS -gt $NSUBV ]]
 	then
 		echo
-		echo "ERRROR: You can't keep $ANS snapshots if there"\
-			"are only $NSUBV!"
+		echo "ERRROR: You can't keep $ANS snapshots if there are only $NSUBV!"
 	else
 		if [[ $ANS -eq $NSUBV ]]
 		then
@@ -171,28 +172,13 @@ do
 done
 }
 
-
+# RUN
 # The main function that runs all the stuff
 run () {
+# Variables for this single run
 SUBVOL=$1
-PRIOR=$2
-
-# Set "max frequency" of snapshots based on priority
-if [[ $PRIOR = 0 ]]
-then
-	DATE="date +_%Y-%m-%d_%H:%M"
-	NDEF=$NDEF0
-elif [[ $PRIOR = 2 ]]
-then
-	DATE="date +_%Y-%m"
-	NDEF=$NDEF2
-else
-	echo
-	echo "[Fatal error]"
-	echo "Wrong priority (my fault)! Please, contact me at github!"
-	echo
-	exit 1
-fi
+NDEF=$2
+FREQ=$3
 
 # Check if the block device exist
 if [[ ! -b $FSPART ]]
@@ -214,7 +200,7 @@ then
 	read -r sure
 	if [[ $sure = "y" ]]
 	then
-		sudo mount $FSPART $ROOTFS
+		$SUDO mount $FSPART $ROOTFS
 		echo "[Volume mounted]"
 	else
 		echo "[Volume not mounted]"
@@ -234,12 +220,34 @@ then
 	unmount_vol 1
 fi
 
-# Take the snapshot if there isn't a subvolume with the same name
+# Check the age of last snapshot
+AGE=$(find $ROOTFS "$ROOTFS$SUBVOL"_* -maxdepth 0 | grep "$SUBVOL" | tail -n 1 )
+AGE=${AGE##*_}
+# Simple check on the name of snapshot, for backward compatibility
+if [[ $AGE =~ ^[0-9]+$ && $AGE -le $(date +%s) ]]
+then
+	AGE=$(( $(date +%s) - AGE ))
+	old=1
+else
+	echo -e "\nYour previous snapshot is made with a previous version of"\
+		"this script, you can take a snapshot but you can't have age control,"\
+		"at least for this run. Pay attention when this script check old"\
+		"snapshots."
+	old=0
+fi
+
+# Take the snapshot if there isn't a subvolume with the same name or if last
+#  snapshot isn't old enough
 if [[ -d $ROOTFS$SUBVOL$($DATE) ]]
 then
-	echo
-	echo "You have already done a snapshot of $SUBVOL subvolume with a time"\
-		"string like $($DATE)."
+	echo -e "\nYou have already done a snapshot of $SUBVOL subvolume with a"\
+		"time string like $($DATE), just wait a second."
+elif [[ $old -eq 1 && $AGE -lt $FREQ ]]
+then
+	WAIT=$(( FREQ - AGE ))
+	echo -e "\nYou have to wait $WAIT seconds before another $SUBVOL snapshot."\
+		"If you want to make snapshot of this subvolume more frequently,"\
+		"change configurations in the head of this script file."
 else
 	do_snapshot
 fi
@@ -257,32 +265,60 @@ else
 fi
 }
 
+# STOP_IT
 # Stop function, just to be sure that you can always run it for every
 #  subvolume you desire, to exit it calls unmount_vol, with error code.
 stop_it () {
 ERR=$1
-if [[ $SUBVOL = $SUBV0 && -n $SUBV2 ]]
+if [[ -z $j || j -eq ${#SUBVS[@]} ]]
 then
-	run $SUBV2 2
-else
 	unmount_vol "$ERR"
 fi
 }
 
+# CHECK CONFIGURATIONS
+# This function will check if you have the same number of subvolumes,
+#  frequencies and 'number of copy to keep'.
+# It also check if some frequency or some 'number of copy to keep' is null.
+check_config () {
+if [[ ${#SUBVS[@]} -ne ${#NDEFS[@]} ||\
+	  ${#SUBVS[@]} -ne ${#FREQS[@]} ]]
+then
+	echo -e "\nYou have different array size, so you have wrong configuration."\
+		"Check the head of this script file for configurations."
+	stop_it 1
+fi
+for (( i=0 ; i<${#NDEFS[@]} ; i++ ))
+do
+	if [[ ${NDEFS[i]} -eq "0" ]]
+	then
+		echo -e "\nThere is a 0 in some configuration, check the head of this"\
+			"script file."
+		stop_it 1
+	fi
+done
+for (( i=0 ; i<${#FREQS[@]} ; i++ ))
+do
+	if [[ ${FREQS[i]} -eq "0" ]]
+	then
+		echo -e "\nThere is a 0 in some configuration, check the head of this"\
+			"script file."
+		stop_it 1
+	fi
+done
+}
+
+
+# MAIN
 # This part launches everything if you have configured subvolumes
 
-if [[ -n $SUBV0 && -n $NDEF0 ]]
-then
-	run $SUBV0 0
-fi
-if [[ -n $SUBV2 && -n $NDEF2 && $SUBVOL != $SUBV2 ]]
-then
-	run $SUBV2 2
-fi
-if [[ -z $SUBV0 && -z $SUBV2 ]]
-then
-	echo
-	echo "You haven't configured any subvolume to backup,"\
-		"read the head of this script for more information."
-fi
+check_config
+
+DATE="date +_%Y-%m-%d_%s"
+
+for (( j=0 ; j<${#SUBVS[@]} ; j++ ))
+do
+	run "${SUBVS[j]}" "${NDEFS[j]}" "${FREQS[j]}"
+done
+
 stop_it 0
