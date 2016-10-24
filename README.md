@@ -1,6 +1,7 @@
 # snapscript
 
 Script to simplify btrfs snapshots management.
+Currently I'm using `snapper` and `snap-pac` to take automatic snapshots, so this script will probably become unmaintained.
 
 Use it at your own risk, there is no guarantee that this scripts does not kill you system.
 
